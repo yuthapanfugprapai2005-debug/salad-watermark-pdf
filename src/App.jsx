@@ -433,6 +433,65 @@ export default function App() {
     }
   };
 
+  const handleStripeCheckout = () => {
+    if (supabaseConnected && !user) {
+      setShowUpgradeModal(false);
+      setShowAuthModal(true);
+      showToast('กรุณาเข้าสู่ระบบก่อนอัปเกรดเป็น Pro ครับ');
+      return;
+    }
+    if (!supabaseConnected) {
+      setIsProPlan(true);
+      setShowUpgradeModal(false);
+      showToast('👑 เปิดใช้งาน Pro (โหมดทดสอบ) แล้ว!');
+      return;
+    }
+    const { stripePaymentLink } = getAppEnv();
+    if (!stripePaymentLink) {
+      showToast('⚠️ กรุณาใส่ VITE_STRIPE_PAYMENT_LINK ในไฟล์ .env ก่อนครับ', 'error');
+      return;
+    }
+    const sep = stripePaymentLink.includes('?') ? '&' : '?';
+    const checkoutUrl = `${stripePaymentLink}${sep}client_reference_id=${encodeURIComponent(
+      user.id
+    )}&prefilled_email=${encodeURIComponent(user.email || '')}`;
+    window.location.href = checkoutUrl;
+  };
+
+  const handleEmailAuth = async (e) => {
+    e.preventDefault();
+    if (!supabaseRef.current) {
+      setAuthError('ยังไม่ได้ใส่ค่า VITE_SUPABASE_URL และ VITE_SUPABASE_ANON_KEY ในไฟล์ .env');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      if (authMode === 'signup') {
+        const { error } = await supabaseRef.current.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+        showToast('✅ สมัครสมาชิกสำเร็จ! กรุณาเช็กอีเมลยืนยัน (หรือเข้าสู่ระบบได้เลย)');
+        setShowAuthModal(false);
+      } else {
+        const { error } = await supabaseRef.current.auth.signInWithPassword({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+        showToast('✅ เข้าสู่ระบบสำเร็จแล้ว!');
+        setShowAuthModal(false);
+      }
+      setAuthPassword('');
+    } catch (err) {
+      setAuthError(err?.message || 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const handleGoogleLogin = async () => {
     if (!supabaseRef.current) {
       setAuthError('กรุณาตั้งค่าไฟล์ .env เชื่อม Supabase ก่อนครับ');
