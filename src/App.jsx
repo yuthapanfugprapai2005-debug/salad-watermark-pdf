@@ -27,11 +27,9 @@ import {
   Database,
   Mail,
   KeyRound,
+  RefreshCw,
 } from 'lucide-react';
 
-// ============================================================================
-// DYNAMIC CDN LOADERS (PDF-LIB, JSZIP, PDF.JS, SUPABASE-JS)
-// ============================================================================
 const scriptCache = {};
 
 function loadScript(src, globalName) {
@@ -78,9 +76,7 @@ const loadPdfJs = async () => {
   return pdfjsLib;
 };
 
-// Read Vite .env variables safely (works in VS Code Vite & Preview Sandbox)
-// Read Vite .env variables safely (direct access required for Vite production builds on Vercel)
-function getSupabaseEnv() {
+function getAppEnv() {
   try {
     return {
       url: import.meta.env.VITE_SUPABASE_URL || '',
@@ -92,9 +88,6 @@ function getSupabaseEnv() {
   }
 }
 
-// ============================================================================
-// HELPER: RENDER THAI/ENGLISH TEXT TO HIGH-DPI TRANSPARENT PNG FOR PDF-LIB
-// ============================================================================
 function renderTextToPngBytes(text, colorHex, fontSizePx, bold = true) {
   const scale = 3;
   const canvas = document.createElement('canvas');
@@ -150,18 +143,18 @@ function loadImageFileToPngBytes(imageUrl) {
 }
 
 function parsePageIndices(totalPages, mode, customRangeStr) {
-  const indices = [];
   if (mode === 'all') {
-    for (let i = 0; i < totalPages; i++) indices.push(i);
-    return indices;
+    return Array.from({ length: totalPages }, (_, i) => i);
   }
   if (mode === 'odd') {
-    for (let i = 0; i < totalPages; i += 2) indices.push(i);
-    return indices;
+    const res = [];
+    for (let i = 0; i < totalPages; i += 2) res.push(i);
+    return res;
   }
   if (mode === 'even') {
-    for (let i = 1; i < totalPages; i += 2) indices.push(i);
-    return indices;
+    const res = [];
+    for (let i = 1; i < totalPages; i += 2) res.push(i);
+    return res;
   }
   if (mode === 'first') {
     return totalPages > 0 ? [0] : [];
@@ -237,26 +230,21 @@ const getTodayThai = () => {
   }`;
 };
 
-// ============================================================================
-// MAIN APPLICATION: SaladWatermarkPDF (CONNECTED TO SUPABASE AUTH & DB)
-// ============================================================================
 export default function App() {
-  // Supabase Client & Auth State
   const supabaseRef = useRef(null);
   const [supabaseConnected, setSupabaseConnected] = useState(false);
   const [user, setUser] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
+  const [authMode, setAuthMode] = useState('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  // Plan Mode (Synced with Supabase `profiles.plan` when logged in)
   const [isProPlan, setIsProPlan] = useState(false);
+  const [isRefreshingPlan, setIsRefreshingPlan] = useState(false);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
 
-  // PDF Files, Preview & Watermark State
   const [pdfFiles, setPdfFiles] = useState([]);
   const [activeFileId, setActiveFileId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -270,14 +258,6 @@ export default function App() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewDims, setPreviewDims] = useState({ width: 595, height: 842 });
 
-  const showToast = (msg, type = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => {
-      setToast(null);
-    }, 3200);
-  };
-
-  // Watermark Configuration
   const [wmType, setWmType] = useState('text');
   const [wmText, setWmText] = useState('สำเนาถูกต้อง • CONFIDENTIAL');
   const [wmColor, setWmColor] = useState('#dc2626');
@@ -295,15 +275,22 @@ export default function App() {
   const [includeFilenameFooter, setIncludeFilenameFooter] = useState(false);
   const [lockMetadata, setLockMetadata] = useState(true);
 
-  // Fetch User Plan from Supabase `profiles` table (with email fallback & refresh support)
+  const showToast = (msg, type = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 3200);
+  };
+
   const fetchUserProfile = async (client, currentUser) => {
     const userId = typeof currentUser === 'string' ? currentUser : currentUser?.id;
     const userEmail = typeof currentUser === 'object' ? currentUser?.email : null;
 
     if (!client || (!userId && !userEmail)) {
       setIsProPlan(false);
-      return;
+      return false;
     }
+
     try {
       let profileRow = null;
 
@@ -337,11 +324,10 @@ export default function App() {
         const isNotExpired = !expiryTime || Number.isNaN(expiryTime) || expiryTime > Date.now();
         if (normalizedPlan === 'pro' && isNotExpired) {
           setIsProPlan(true);
-          return;
+          return true;
         }
       }
 
-      // Fallback: check subscriptions table in case webhook recorded active subscription there
       if (userId) {
         const { data: subData } = await client
           .from('subscriptions')
@@ -357,20 +343,21 @@ export default function App() {
             String(subData.plan || '').toLowerCase() === 'pro')
         ) {
           setIsProPlan(true);
-          return;
+          return true;
         }
       }
 
       setIsProPlan(false);
+      return false;
     } catch {
       setIsProPlan(false);
+      return false;
     }
   };
 
-  // Initialize Supabase Connection Automatically from .env
   useEffect(() => {
     let authSubscription = null;
-    const { url, anonKey } = getSupabaseEnv();
+    const { url, anonKey } = getAppEnv();
 
     if (!url || !anonKey) {
       setSupabaseConnected(false);
@@ -390,16 +377,15 @@ export default function App() {
         const currentUser = session?.user || null;
         setUser(currentUser);
         if (currentUser) {
-          await fetchUserProfile(client, currentUser.id);
+          await fetchUserProfile(client, currentUser);
         }
 
-        // Detect redirect back from Stripe Checkout (?payment=success)
         if (typeof window !== 'undefined') {
           const params = new URLSearchParams(window.location.search);
           if (params.get('payment') === 'success') {
-            showToast('🎉 ชำระเงินสำเร็จ! กำลังเปิดใช้งานสิทธิ์ PRO รายเดือนให้คุณ...');
+            showToast('🎉 ชำระเงินสำเร็จ! กำลังตรวจสอบสิทธิ์ PRO...');
             if (currentUser) {
-              setTimeout(() => fetchUserProfile(client, currentUser.id), 2000);
+              setTimeout(() => fetchUserProfile(client, currentUser), 1500);
             }
             window.history.replaceState({}, document.title, window.location.pathname);
           }
@@ -409,7 +395,7 @@ export default function App() {
           const nextUser = newSession?.user || null;
           setUser(nextUser);
           if (nextUser) {
-            fetchUserProfile(client, nextUser.id);
+            fetchUserProfile(client, nextUser);
           } else {
             setIsProPlan(false);
           }
@@ -425,7 +411,18 @@ export default function App() {
     };
   }, []);
 
-  // Redirect logged-in user to Stripe Payment Link with user.id & email attached
+  const handleRefreshPlan = async () => {
+    if (!supabaseRef.current || !user) return;
+    setIsRefreshingPlan(true);
+    const activePro = await fetchUserProfile(supabaseRef.current, user);
+    setIsRefreshingPlan(false);
+    showToast(
+      activePro
+        ? '👑 ยืนยันสถานะ PRO รายเดือนเรียบร้อยแล้ว!'
+        : 'ℹ️ ขณะนี้บัญชีอยู่ในสถานะ FREE'
+    );
+  };
+
   const handleStripeCheckout = () => {
     if (supabaseConnected && !user) {
       setShowUpgradeModal(false);
@@ -439,7 +436,7 @@ export default function App() {
       showToast('👑 เปิดใช้งาน Pro (โหมดทดสอบ) แล้ว!');
       return;
     }
-    const { stripePaymentLink } = getSupabaseEnv();
+    const { stripePaymentLink } = getAppEnv();
     if (!stripePaymentLink) {
       showToast('⚠️ กรุณาใส่ VITE_STRIPE_PAYMENT_LINK ในไฟล์ .env ก่อนครับ', 'error');
       return;
@@ -451,7 +448,6 @@ export default function App() {
     window.location.href = checkoutUrl;
   };
 
-  // Auth Handlers (Email/Password + Google OAuth)
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     if (!supabaseRef.current) {
@@ -467,7 +463,7 @@ export default function App() {
           password: authPassword,
         });
         if (error) throw error;
-        showToast('✅ สมัครสมาชิกสำเร็จ! กรุณาเช็กอีเมลยืนยัน (หรือเข้าสู่ระบบได้เลย)');
+        showToast('✅ สมัครสมาชิกสำเร็จ! กรุณาเช็กอีเมลยืนยันหรือเข้าสู่ระบบได้เลย');
         setShowAuthModal(false);
       } else {
         const { error } = await supabaseRef.current.auth.signInWithPassword({
@@ -514,7 +510,6 @@ export default function App() {
     showToast('ออกจากระบบเรียบร้อยแล้ว');
   };
 
-  // Log usage to Supabase `usage_logs` (syncs to Virtual HQ Room 401)
   const recordUsageToSupabase = async (fileCount, totalPages) => {
     if (!supabaseRef.current) return;
     try {
@@ -534,18 +529,16 @@ export default function App() {
   const activeFile = pdfFiles.find((f) => f.id === activeFileId) || pdfFiles[0] || null;
   const effectiveText = includeDateTag ? `${wmText} (${getTodayThai()})` : wmText;
 
-  // Enforce Free Plan limitations automatically
   useEffect(() => {
     if (!isProPlan) {
       if (wmType === 'image') setWmType('text');
       if (pageRangeMode !== 'first') setPageRangeMode('first');
       if (wmPosition === 'tile') setWmPosition('center');
-    } else {
-      if (pageRangeMode === 'first') setPageRangeMode('all');
+    } else if (pageRangeMode === 'first') {
+      setPageRangeMode('all');
     }
   }, [isProPlan]);
 
-  // Render Page 1 of the currently selected REAL PDF onto the preview canvas
   useEffect(() => {
     let cancelled = false;
 
@@ -589,7 +582,6 @@ export default function App() {
     };
   }, [activeFile?.id]);
 
-  // Add Real PDF Files
   const handleAddPdfFiles = async (fileList) => {
     const incoming = Array.from(fileList || []).filter(
       (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
@@ -644,7 +636,6 @@ export default function App() {
     }
   };
 
-  // Generate Sample PDF
   const handleCreateSamplePdf = async () => {
     try {
       const PDFLib = await loadPdfLib();
@@ -763,9 +754,6 @@ export default function App() {
     setWmRotation(p.wmRotation);
   };
 
-  // ============================================================================
-  // CORE REAL PDF WATERMARKING ENGINE (PDF-LIB + JSZIP)
-  // ============================================================================
   const processSinglePdf = async (PDFLib, item, wmPngData) => {
     const pdfDoc = await PDFLib.PDFDocument.load(item.arrayBuffer.slice(0), {
       ignoreEncryption: true,
@@ -874,7 +862,6 @@ export default function App() {
     return await pdfDoc.save();
   };
 
-  // Run Watermark & Download
   const handleExportAll = async () => {
     if (pdfFiles.length === 0 || isProcessing) return;
     if (wmType === 'text' && !wmText.trim()) {
@@ -984,7 +971,6 @@ export default function App() {
         body { font-family: 'Prompt', sans-serif; }
       `}</style>
 
-      {/* Toast Notification */}
       {toast && (
         <div
           className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl text-xs font-bold flex items-center gap-2 border ${
@@ -1002,7 +988,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ================= TOP SAAS NAVIGATION BAR ================= */}
       <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-4 sm:px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -1032,7 +1017,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Plan Status Pill (Allow demo toggle only when not connected to live Supabase) */}
             <button
               onClick={() => {
                 if (!supabaseConnected) {
@@ -1046,11 +1030,6 @@ export default function App() {
                   ? 'bg-amber-500/20 text-amber-300 border-amber-400/50'
                   : 'bg-slate-800 text-slate-300 border-slate-700'
               }`}
-              title={
-                supabaseConnected
-                  ? 'สถานะแพ็กเกจจากฐานข้อมูล Supabase'
-                  : 'สลับเพื่อทดสอบมุมมองลูกค้า Free vs Pro'
-              }
             >
               <Crown className="w-3.5 h-3.5" />
               <span>{isProPlan ? 'PRO รายเดือน' : 'FREE (ทีละ 1 แผ่น)'}</span>
@@ -1063,7 +1042,6 @@ export default function App() {
               💎 แพ็กเกจราคา
             </button>
 
-            {/* User Auth Button */}
             {user ? (
               <div className="flex items-center gap-2 pl-2 border-l border-slate-800">
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs">
@@ -1096,11 +1074,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* ================= MAIN 2-COLUMN WORKSPACE ================= */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* LEFT COLUMN (7 COLS): UPLOAD QUEUE & WATERMARK SETTINGS */}
         <div className="lg:col-span-7 space-y-4">
-          {/* 1. DRAG & DROP PDF UPLOAD ZONE */}
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -1230,7 +1205,6 @@ export default function App() {
             )}
           </div>
 
-          {/* 2. QUICK PRESETS BAR */}
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-3.5">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
@@ -1257,7 +1231,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* 3. WATERMARK TYPE & CONTENT */}
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-extrabold text-sky-300 flex items-center gap-1.5">
@@ -1381,7 +1354,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Sliders */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
               <div>
                 <div className="flex justify-between text-xs text-slate-300 mb-1.5">
@@ -1429,7 +1401,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Position 9-Grid + Tile Mode */}
             <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center gap-4">
               <div>
                 <div className="text-[11px] text-slate-400 mb-1.5 font-semibold">ตำแหน่ง 9 จุด</div>
@@ -1509,7 +1480,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 4. PRO EXTRAS */}
             <div className="pt-3 border-t border-slate-800 space-y-3 text-xs">
               <div className="font-bold text-sky-300 flex items-center gap-1.5">
                 <Layers className="w-4 h-4" />
@@ -1588,7 +1558,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* RIGHT COLUMN (5 COLS): REAL-TIME LIVE PDF PREVIEW & EXPORT CTA */}
         <div className="lg:col-span-5 lg:sticky lg:top-20 space-y-4">
           <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3 shadow-2xl">
             <div className="flex items-center justify-between text-xs">
@@ -1601,7 +1570,6 @@ export default function App() {
               </span>
             </div>
 
-            {/* A4 Preview Container */}
             <div
               className="relative w-full mx-auto bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-700 select-none"
               style={{
@@ -1658,7 +1626,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Live Watermark Overlay */}
               <div
                 className={`absolute inset-0 pointer-events-none overflow-hidden flex z-30 ${
                   wmPosition === 'tile'
@@ -1742,7 +1709,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Primary Export Button */}
             <button
               onClick={handleExportAll}
               disabled={isProcessing || pdfFiles.length === 0}
@@ -1778,7 +1744,6 @@ export default function App() {
         </div>
       </main>
 
-      {/* ================= AUTH MODAL (SUPABASE LOGIN / SIGNUP) ================= */}
       {showAuthModal && (
         <div
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1907,7 +1872,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ================= PRICING / UPGRADE MODAL ================= */}
       {showUpgradeModal && (
         <div
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1917,7 +1881,7 @@ export default function App() {
             className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-start justify-between">
+            <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-lg font-extrabold text-white">
                   💎 แพ็กเกจ SaladWatermarkPDF
@@ -1926,12 +1890,24 @@ export default function App() {
                   เชื่อมบัญชี Supabase เรียบร้อย — พร้อมผูกระบบตัดบัตร Stripe เพื่อปลดล็อก Pro อัตโนมัติ
                 </p>
               </div>
-              <button
-                onClick={() => setShowUpgradeModal(false)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {user && supabaseConnected && (
+                  <button
+                    onClick={handleRefreshPlan}
+                    disabled={isRefreshingPlan}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isRefreshingPlan ? 'animate-spin' : ''}`} />
+                    <span>รีเฟรชสิทธิ์</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowUpgradeModal(false)}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
